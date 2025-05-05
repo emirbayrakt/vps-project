@@ -1,0 +1,17 @@
+FROM mongo:7.0-jammy
+
+ARG TZ=Europe/Berlin
+ENV TZ=$TZ
+
+# Install tzdata and configure the timezone
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tzdata \
+ && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+ && echo $TZ > /etc/timezone \
+ && dpkg-reconfigure -f noninteractive tzdata \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy keyfile and secure permissions
+COPY replica.key /data/replica.key
+RUN chown 999:999 /data/replica.key \
+ && chmod 600 /data/replica.key

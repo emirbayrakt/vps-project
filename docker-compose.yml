@@ -1,0 +1,236 @@
+services:
+    ### ────────── Database ──────────
+    mongo:
+        build:
+            context: .
+            dockerfile: Dockerfile.mongo
+        restart: always
+        env_file: .env
+        command:
+            - mongod
+            - --bind_ip_all
+            - --auth
+            - --replSet
+            - rs0
+            - --keyFile
+            - /data/replica.key
+            - --quiet
+        volumes:
+            - mongo-data:/data/db
+            - /etc/timezone:/etc/timezone:ro
+            - /etc/localtime:/etc/localtime:ro
+        networks:
+            - backend
+        environment:
+            TZ: Europe/Berlin
+            MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+            MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+        healthcheck:
+            test: >
+                mongosh --quiet -u $${MONGO_INITDB_ROOT_USERNAME}
+                -p $${MONGO_INITDB_ROOT_PASSWORD}
+                --authenticationDatabase admin
+                --eval 'db.runCommand({ ping: 1 })'
+            interval: 30s
+            timeout: 10s
+            retries: 5
+            start_period: 30s
+
+    ### ────────── rs.initiate thingy ─────
+
+    mongo-init:
+        image: mongo:7.0-jammy
+        depends_on:
+            - mongo
+        # run a tiny shell snippet that only calls rs.initiate() if needed
+        entrypoint: |
+            bash -c '
+            # ---------- wait for mongod to answer ----------
+            until mongosh --host mongo \
+                -u "$$MONGO_INITDB_ROOT_USERNAME" \
+                -p "$$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin \
+                --eval "db.adminCommand({ ping: 1 })" >/dev/null 2>&1
+            do
+                echo "⏳ waiting for mongod to accept connections…"
+                sleep 2
+            done
+
+            echo "🚀 initiating replica set…"
+
+            # ---------- run rs.initiate() exactly once ----------
+            mongosh --host mongo \
+                -u "$$MONGO_INITDB_ROOT_USERNAME" \
+                -p "$$MONGO_INITDB_ROOT_PASSWORD" \
+                --authenticationDatabase admin <<'EOS'
+            try {
+                rs.initiate({
+                _id: "rs0",
+                members: [{ _id: 0, host: "mongo:27017" }]
+                });
+            } catch (e) {
+                // if it’s already initialised, just log and exit 0
+                print("Replica‑set init skipped:", e.message);
+            }
+            quit();
+            EOS
+            '
+        env_file:
+            - .env
+        networks:
+            - backend
+        restart: "no"
+
+    ### ────────── Message Queue ─────
+    rabbitmq:
+        build:
+            context: .
+            dockerfile: Dockerfile.rabbitmq
+        restart: always
+        env_file: .env
+        volumes:
+            - /etc/timezone:/etc/timezone:ro
+            - /etc/localtime:/etc/localtime:ro
+            - rabbitmq-data:/var/lib/rabbitmq
+        networks:
+            - backend
+        environment:
+            TZ: Europe/Berlin
+            RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+            RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+        healthcheck:
+            test: ["CMD", "rabbitmq-diagnostics", "ping"]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+
+    ### ────────── Node API ──────────
+    api:
+        build:
+            context: ./node
+            dockerfile: Dockerfile.api
+        env_file: .env
+        environment:
+            TZ: Europe/Berlin
+            REDIS_HOST: redis
+            REDIS_PORT: 6379
+            REDIS_PASSWORD: ${REDIS_PASSWORD}
+        restart: always
+        depends_on:
+            redis:
+                condition: service_healthy
+            mongo:
+                condition: service_healthy
+            rabbitmq:
+                condition: service_healthy
+        volumes:
+            - public:/app/public # persistent uploads
+            - auto-file-backups:/app/auto-file-backups # files backups
+            - tmp-files:/app/tmp
+            - /etc/timezone:/etc/timezone:ro
+            - /etc/localtime:/etc/localtime:ro
+        networks:
+            - backend
+            - frontend
+        ports:
+            - "3000:3000"
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 20s
+
+    ### ────────── Node Worker (single core work)  ──────────
+    worker:
+        build:
+            context: ./node
+            dockerfile: Dockerfile.worker
+        env_file: .env
+        environment:
+            TZ: Europe/Berlin
+            REDIS_HOST: redis
+            REDIS_PORT: 6379
+            REDIS_PASSWORD: ${REDIS_PASSWORD}
+            RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+            RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+        restart: always
+        depends_on:
+            rabbitmq:
+                condition: service_healthy
+            mongo:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        volumes:
+            - public:/app/public # persistent uploads
+            - auto-file-backups:/app/auto-file-backups # files backups
+            - tmp-files:/app/tmp
+            - /etc/timezone:/etc/timezone:ro
+            - /etc/localtime:/etc/localtime:ro
+        networks:
+            - backend
+
+    ### ────────── React SPA ─────────
+    web:
+        build:
+            context: ./react # contains Dockerfile.react
+            args:
+                ENV_FILE: .env.prod
+        restart: always
+        networks:
+            - frontend
+        environment:
+            TZ: Europe/Berlin
+        volumes:
+            - /etc/timezone:/etc/timezone:ro
+            - /etc/localtime:/etc/localtime:ro
+        ports:
+            - "3001:80"
+        depends_on:
+            api:
+                condition: service_started
+
+    # ────────── Cache / PubSub ────────
+    redis:
+        image: redis:7-alpine
+        restart: always
+        environment:
+            TZ: Europe/Berlin
+            REDIS_PASSWORD: ${REDIS_PASSWORD}
+        command:
+            [
+                "redis-server",
+                "--save",
+                "60",
+                "1",
+                "--loglevel",
+                "warning",
+                "--requirepass",
+                "${REDIS_PASSWORD}",
+            ]
+        networks:
+            - backend
+        volumes:
+            - redis-data:/data
+            - /etc/timezone:/etc/timezone:ro
+            - /etc/localtime:/etc/localtime:ro
+        healthcheck:
+            test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+
+volumes:
+    mongo-data:
+    rabbitmq-data:
+    public:
+    auto-file-backups:
+    redis-data:
+    tmp-files:
+
+networks:
+    backend:
+        internal: true
+    frontend:
+        driver: bridge
