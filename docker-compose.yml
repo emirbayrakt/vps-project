@@ -80,6 +80,38 @@ services:
         networks:
             - backend
         restart: "no"
+    ### ────────── Mongo → automatic dumps ──────────
+    mongo-backup:
+        image: mongo:7.0-jammy # includes mongodump
+        depends_on:
+            mongo:
+                condition: service_healthy # wait until the DB is up
+        env_file: .env
+        restart: always
+        networks:
+            - backend
+        environment:
+            TZ: Europe/Berlin
+        volumes:
+            - auto-db-backup:/backups
+            - /etc/timezone:/etc/timezone:ro
+            - /etc/localtime:/etc/localtime:ro
+        entrypoint: >
+            bash -c '
+            set -e
+            echo "📦 Mongo backup service started"
+            while true; do
+                ts=$(date +%Y%m%dT%H%M%S)
+                echo "⏳  Dumping at $ts …"
+                mongodump --uri="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongo:27017/?authSource=admin&replicaSet=rs0" \
+                        --archive=/backups/dump_${ts}.gz --gzip
+                echo "✅  Dump finished"
+                echo "🧹  Purging dumps older than 30 days …"
+                find /backups -type f -mtime +30 -name "*.gz" -delete
+                echo "💤  Sleeping 10 h …"
+                sleep 36000   # 10 h = 10 × 60 × 60 s
+            done
+            '
 
     ### ────────── Message Queue ─────
     rabbitmq:
@@ -171,6 +203,30 @@ services:
         networks:
             - backend
 
+    ### ────────── Public‑folder backups ──────────
+    backup:
+        image: alpine:3.19
+        restart: always
+        environment:
+            TZ: Europe/Berlin
+        volumes:
+            - public:/src:ro # read‑only – nothing can corrupt our uploads
+            - auto-file-backups:/dest
+            - /etc/timezone:/etc/timezone:ro
+            - /etc/localtime:/etc/localtime:ro
+        # tiny one‑liner: install zip + findutils, then loop forever
+        command: >
+            sh -c "apk add --no-cache zip findutils tzdata &&
+                while true; do
+                    TS=\$(date +'%Y-%m-%dT%H-%M-%S');
+                    echo \"📦 Creating /dest/public-\$TS.zip\";
+                    zip -rq /dest/public-\$TS.zip /src;
+                    echo \"🧹 Purging zips older than 10 days…\";
+                    find /dest -name 'public-*.zip' -mtime +10 -type f -print -delete;
+                    echo \"😴 Sleeping 10h…\";
+                    sleep 36000;
+                done"
+
     ### ────────── React SPA ─────────
     web:
         build:
@@ -226,6 +282,7 @@ volumes:
     rabbitmq-data:
     public:
     auto-file-backups:
+    auto-db-backup:
     redis-data:
     tmp-files:
 
