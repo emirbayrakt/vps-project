@@ -96,22 +96,29 @@ services:
             - auto-db-backup:/backups
             - /etc/timezone:/etc/timezone:ro
             - /etc/localtime:/etc/localtime:ro
-        entrypoint: >
-            bash -c '
-            set -e
-            echo "📦 Mongo backup service started"
-            while true; do
-                ts=$(date +%Y%m%dT%H%M%S)
-                echo "⏳  Dumping at $ts …"
-                mongodump --uri="mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongo:27017/?authSource=admin&replicaSet=rs0" \
-                        --archive=/backups/dump_${ts}.gz --gzip
-                echo "✅  Dump finished"
-                echo "🧹  Purging dumps older than 30 days …"
-                find /backups -type f -mtime +30 -name "*.gz" -delete
-                echo "💤  Sleeping 10 h …"
-                sleep 36000   # 10 h = 10 × 60 × 60 s
-            done
-            '
+        entrypoint:
+            - bash
+            - -ec
+            - |
+                echo "📦 Mongo backup service started"
+
+                while true; do
+                    ts=$$(date +%Y-%m-%dT%H-%M-%S)                           
+                    echo "⏳  Dumping at $$ts …"
+
+                    mongodump \
+                    --uri="mongodb://$${MONGO_INITDB_ROOT_USERNAME}:$${MONGO_INITDB_ROOT_PASSWORD}@mongo:27017/?authSource=admin&replicaSet=rs0" \
+                    --archive="/backups/dump_$$ts.gz" \
+                    --gzip
+
+                    echo "✅  Dump finished"
+
+                    echo "🧹  Deleting dumps older than 30 days…"
+                    find /backups -type f -name '*.gz' -mtime +30 -delete
+
+                    echo "💤  Sleeping 3days…"
+                    sleep 259200
+                done
 
     ### ────────── Message Queue ─────
     rabbitmq:
@@ -205,7 +212,9 @@ services:
 
     ### ────────── Public‑folder backups ──────────
     backup:
-        image: alpine:3.19
+        build:
+            context: .
+            dockerfile: Dockerfile.backup
         restart: always
         environment:
             TZ: Europe/Berlin
@@ -215,17 +224,24 @@ services:
             - /etc/timezone:/etc/timezone:ro
             - /etc/localtime:/etc/localtime:ro
         # tiny one‑liner: install zip + findutils, then loop forever
-        command: >
-            sh -c "apk add --no-cache zip findutils tzdata &&
+        command:
+            - sh
+            - -uec
+            - |
                 while true; do
-                    TS=\$(date +'%Y-%m-%dT%H-%M-%S');
-                    echo \"📦 Creating /dest/public-\$TS.zip\";
-                    zip -rq /dest/public-\$TS.zip /src;
-                    echo \"🧹 Purging zips older than 10 days…\";
-                    find /dest -name 'public-*.zip' -mtime +10 -type f -print -delete;
-                    echo \"😴 Sleeping 10h…\";
-                    sleep 36000;
-                done"
+                    TS=$$(date +%Y-%m-%dT%H-%M-%S)
+                    echo "📦  Creating /dest/public-$$TS.zip"
+                    ( cd /src && zip -rq "/dest/public-$$TS.zip" . )
+                    echo "🧹  Purging zips older than 10 days…"
+                    find /dest -name "public-*.zip" -mtime +10 -type f -print -delete
+                    echo "😴  Sleeping 3 days…"
+                    sleep 259200
+                done
+        networks:
+            - backend
+        depends_on:
+            api:
+                condition: service_started
 
     ### ────────── React SPA ─────────
     web:

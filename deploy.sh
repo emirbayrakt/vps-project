@@ -16,6 +16,7 @@ echo "🐳 Pulling latest Docker images..."
 docker compose pull
 
 echo "🔧 Rebuilding and restarting containers..."
+docker compose down
 docker compose up --build -d
 
 echo "✅ Deployment finished at $(date)"
