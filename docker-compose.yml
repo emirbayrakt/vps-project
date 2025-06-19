@@ -172,7 +172,7 @@ services:
             - backend
             - frontend
         ports:
-            - "3000:3000"
+            - "127.0.0.1:3000:3000"
         healthcheck:
             test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
             interval: 30s
@@ -258,7 +258,7 @@ services:
             - /etc/timezone:/etc/timezone:ro
             - /etc/localtime:/etc/localtime:ro
         ports:
-            - "3001:80"
+            - "127.0.0.1:3001:80"
         depends_on:
             api:
                 condition: service_started
